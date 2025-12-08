@@ -1,7 +1,10 @@
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: I001
+import numpy as np
 import pandas as pd
 import requests
-from statsmodels.tsa.arima.model import ARIMA
+from sklearn.preprocessing import MinMaxScaler  # type: ignore
+from tensorflow.keras.layers import LSTM, Dense  # type: ignore
+from tensorflow.keras.models import Sequential  # type: ignore
 
 
 # --------------------------
@@ -21,7 +24,7 @@ def load_btc_data(days=7):
     df = pd.DataFrame(prices, columns=["timestamp", "price"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
-    # ❗️ Робимо погодинну агрегацію
+    # Погодинна агрегація
     df.set_index("timestamp", inplace=True)
     df = df.resample("H").mean()
 
@@ -30,43 +33,83 @@ def load_btc_data(days=7):
 
 df = load_btc_data(7)
 
-# --------------------------
-# 2. ARIMA модель
-# --------------------------
-model = ARIMA(df["price"], order=(5, 1, 2))
-model_fit = model.fit()
+# масштабування даних
+scaler = MinMaxScaler(feature_range=(0, 1))
+prices = df["price"].astype(float).to_numpy().reshape(-1, 1)
+scaled = scaler.fit_transform(prices)
+
 
 # --------------------------
-# 3. Прогноз на 10 годин уперед
+# 2. Підготовка даних для LSTM (вікно = 24 години)
 # --------------------------
-steps = 10
-forecast = model_fit.forecast(steps=steps)
+window = 24  # LSTM дивиться у минулі 24 години
+X_list, y_list = [], []
 
-# робимо часовий індекс "кожну годину"
-last_time = df.index[-1]
-forecast_index = pd.date_range(
-    start=last_time + pd.Timedelta(hours=1), periods=steps, freq="H"
+for i in range(window, len(scaled)):
+    X_list.append(scaled[i - window : i, 0])
+    y_list.append(scaled[i, 0])
+
+X = np.array(X_list)
+y = np.array(y_list)
+X = np.reshape(X, (X.shape[0], X.shape[1], 1))  # (samples, timesteps, features)
+
+# --------------------------
+# 3. LSTM модель
+# --------------------------
+model = Sequential(
+    [LSTM(64, return_sequences=True, input_shape=(X.shape[1], 1)), LSTM(32), Dense(1)]
 )
 
-forecast = pd.Series(forecast.values, index=forecast_index, name="predicted_mean")
-
-print("📈 Погодинний прогноз на 10 годин:")
-print(forecast)
+model.compile(optimizer="adam", loss="mean_squared_error")
+model.fit(X, y, epochs=20, batch_size=32, verbose=1)
 
 # --------------------------
-# 4. Побудова графіка
+# 4. Прогноз на 10 годин уперед
+# --------------------------
+future_steps = 10
+last_window = scaled[-window:]  # останні 24 години
+predictions = []
+
+current_input = last_window.reshape(1, window, 1)
+
+for _ in range(future_steps):
+    pred = model.predict(current_input)[0][0]
+    predictions.append(pred)
+
+    # додаємо прогноз до вікна
+    current_input = np.append(current_input[:, 1:, :], [[[pred]]], axis=1)
+
+# розмасштабуємо назад у USD
+forecast_values = scaler.inverse_transform(
+    np.array(predictions).reshape(-1, 1)
+).flatten()
+
+# створюємо часовий індекс
+last_time = df.index[-1]
+forecast_index = pd.date_range(
+    start=last_time + pd.Timedelta(hours=1), periods=future_steps, freq="H"
+)
+
+forecast_series = pd.Series(forecast_values, index=forecast_index)
+
+print("📈 Погодинний LSTM прогноз на 10 годин:")
+print(forecast_series)
+
+# --------------------------
+# 5. Графік
 # --------------------------
 plt.figure(figsize=(12, 6))
-plt.plot(df["price"], label="Historical (hourly)", color="blue")
-plt.plot(forecast, label="Forecast (next 10 hours)", linestyle="--", color="red")
-plt.title("BTC Hour-to-Hour Forecast")
+plt.plot(df["price"], label="Historical (hourly)")
+plt.plot(forecast_series, label="LSTM Forecast (next 10 hours)", linestyle="--")
+plt.title("BTC Hour-to-Hour Forecast (LSTM Neural Network)")
 plt.xlabel("Time (hourly)")
 plt.ylabel("USD")
 plt.legend()
 plt.grid()
 
-output_file = "btc_hour_to_hour_forecast.png"
+output_file = "btc_lstm_hour_forecast.png"
 plt.savefig(output_file, dpi=150, bbox_inches="tight")
 print(f"Графік збережено у {output_file}")
 
+plt.show()
 plt.show()
