@@ -67,7 +67,7 @@ model.fit(X, y, epochs=20, batch_size=32, verbose=1)
 # 4. Прогноз на 10 годин уперед
 # --------------------------
 future_steps = 10
-last_window = scaled[-window:]  # останні 24 години
+last_window = scaled[-window:]
 predictions = []
 
 current_input = last_window.reshape(1, window, 1)
