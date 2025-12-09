@@ -1,10 +1,10 @@
-import matplotlib.pyplot as plt  # noqa: I001
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
-from sklearn.preprocessing import MinMaxScaler  # type: ignore
-from tensorflow.keras.layers import LSTM, Dense  # type: ignore
-from tensorflow.keras.models import Sequential  # type: ignore
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.layers import GRU, LSTM, Dense
+from tensorflow.keras.models import Sequential
 
 
 # --------------------------
@@ -33,38 +33,54 @@ def load_btc_data(days=7):
 
 df = load_btc_data(7)
 
-# масштабування даних
+# Масштабування
 scaler = MinMaxScaler(feature_range=(0, 1))
-prices = df["price"].astype(float).to_numpy().reshape(-1, 1)
-scaled = scaler.fit_transform(prices)
-
+scaled = scaler.fit_transform(df["price"].values.reshape(-1, 1))
 
 # --------------------------
-# 2. Підготовка даних для LSTM (вікно = 24 години)
+# 2. Підготовка даних (вікно 24 години)
 # --------------------------
-window = 24  # LSTM дивиться у минулі 24 години
-X_list, y_list = [], []
+# ...existing code...
+window = 24
+X_list: list[np.ndarray] = []
+y_list: list[float] = []
 
 for i in range(window, len(scaled)):
     X_list.append(scaled[i - window : i, 0])
     y_list.append(scaled[i, 0])
 
-X = np.array(X_list)
+X = np.array(X_list)  # Теперь X имеет тип ndarray с самого начала
 y = np.array(y_list)
-X = np.reshape(X, (X.shape[0], X.shape[1], 1))  # (samples, timesteps, features)
+X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+# ...existing code...
+
 
 # --------------------------
-# 3. LSTM модель
+# 3. Вибір моделі користувачем
 # --------------------------
-model = Sequential(
-    [LSTM(64, return_sequences=True, input_shape=(X.shape[1], 1)), LSTM(32), Dense(1)]
-)
+model_type = "LSTM"  # <<< ЗМІНИ НА "LSTM" або "GRU"
+
+print(f"📌 Обрана модель: {model_type}")
+
+model = Sequential()
+
+if model_type.upper() == "LSTM":
+    model.add(LSTM(64, return_sequences=True, input_shape=(window, 1)))
+    model.add(LSTM(32))
+elif model_type.upper() == "GRU":
+    model.add(GRU(64, return_sequences=True, input_shape=(window, 1)))
+    model.add(GRU(32))
+else:
+    raise ValueError("Невідомий тип моделі. Використай 'LSTM' або 'GRU'.")
+
+model.add(Dense(1))
 
 model.compile(optimizer="adam", loss="mean_squared_error")
-model.fit(X, y, epochs=20, batch_size=32, verbose=1)
+model.fit(X, y, epochs=15, batch_size=32, verbose=1)
+
 
 # --------------------------
-# 4. Прогноз на 10 годин уперед
+# 4. Прогноз на 10 годин вперед
 # --------------------------
 future_steps = 10
 last_window = scaled[-window:]
@@ -76,15 +92,13 @@ for _ in range(future_steps):
     pred = model.predict(current_input)[0][0]
     predictions.append(pred)
 
-    # додаємо прогноз до вікна
     current_input = np.append(current_input[:, 1:, :], [[[pred]]], axis=1)
 
-# розмасштабуємо назад у USD
 forecast_values = scaler.inverse_transform(
     np.array(predictions).reshape(-1, 1)
 ).flatten()
 
-# створюємо часовий індекс
+# Часовий індекс
 last_time = df.index[-1]
 forecast_index = pd.date_range(
     start=last_time + pd.Timedelta(hours=1), periods=future_steps, freq="H"
@@ -92,24 +106,26 @@ forecast_index = pd.date_range(
 
 forecast_series = pd.Series(forecast_values, index=forecast_index)
 
-print("📈 Погодинний LSTM прогноз на 10 годин:")
+print("📈 Погодинний прогноз на 10 годин:")
 print(forecast_series)
+
 
 # --------------------------
 # 5. Графік
 # --------------------------
 plt.figure(figsize=(12, 6))
 plt.plot(df["price"], label="Historical (hourly)")
-plt.plot(forecast_series, label="LSTM Forecast (next 10 hours)", linestyle="--")
-plt.title("BTC Hour-to-Hour Forecast (LSTM Neural Network)")
+plt.plot(
+    forecast_series, label=f"{model_type} Forecast (next 10 hours)", linestyle="--"
+)
+plt.title(f"BTC Hour-to-Hour Forecast ({model_type} Neural Network)")
 plt.xlabel("Time (hourly)")
 plt.ylabel("USD")
 plt.legend()
 plt.grid()
 
-output_file = "btc_lstm_hour_forecast.png"
+output_file = f"btc_{model_type.lower()}_forecast.png"
 plt.savefig(output_file, dpi=150, bbox_inches="tight")
 print(f"Графік збережено у {output_file}")
 
-plt.show()
 plt.show()
