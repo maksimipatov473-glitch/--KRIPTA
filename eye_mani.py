@@ -1,131 +1,123 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import requests
+from binance.client import Client
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.layers import GRU, LSTM, Dense
 from tensorflow.keras.models import Sequential
 
+# -------------------------------------------
+# ✦ Налаштування Binance API
+# -------------------------------------------
+API_KEY = ""
+API_SECRET = ""
+client = Client(API_KEY, API_SECRET)
 
-# --------------------------
-# 1. Завантаження даних (BTC)
-# --------------------------
-def load_btc_data(days=7):
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": days}
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    data = resp.json()
+# -------------------------------------------
+# ✦ Вибір користувача
+# -------------------------------------------
+symbol = input("Введіть криптовалюту (наприклад BTCUSDT): ")
 
-    if "prices" not in data or not data["prices"]:
-        raise ValueError("API response does not contain price data")
+print("Виберіть таймфрейм:\n1) 1m\n2) 5m\n3) 1H\n4) 1D")
+tf_choice = input("Ваш вибір: ")
 
-    prices = data["prices"]
-    df = pd.DataFrame(prices, columns=["timestamp", "price"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+timeframes = {"1": "1m", "2": "5m", "3": "1h", "4": "1d"}
+interval = timeframes.get(tf_choice, "1h")
 
-    # Погодинна агрегація
-    df.set_index("timestamp", inplace=True)
-    df = df.resample("H").mean()
+print("Виберіть модель:\n1) LSTM\n2) GRU")
+model_choice = input("Ваш вибір: ")
 
-    return df
+predict_steps = int(input("На скільки кроків зробити прогноз (напр. 60 = 60 хвилин): "))
 
+# -------------------------------------------
+# ✦ Завантаження даних з Binance
+# -------------------------------------------
+print("Завантаження даних...")
 
-df = load_btc_data(7)
+klines = client.get_klines(symbol=symbol, interval=interval, limit=2000)
+df = pd.DataFrame(
+    klines,
+    columns=[
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "qav",
+        "num_trades",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "ignore",
+    ],
+)
 
-# Масштабування
-scaler = MinMaxScaler(feature_range=(0, 1))
-scaled = scaler.fit_transform(df["price"].values.reshape(-1, 1))
-
-# --------------------------
-# 2. Підготовка даних (вікно 24 години)
-# --------------------------
+df["close"] = df["close"].astype(float)
+data = df["close"].to_numpy().reshape(-1, 1)  # Використовуйте to_numpy()
 # ...existing code...
-window = 24
-X_list: list[np.ndarray] = []
-y_list: list[float] = []
 
-for i in range(window, len(scaled)):
-    X_list.append(scaled[i - window : i, 0])
-    y_list.append(scaled[i, 0])
+# Нормалізація
+scaler = MinMaxScaler()
+scaled = scaler.fit_transform(data)
 
-X = np.array(X_list)  # Теперь X имеет тип ndarray с самого начала
-y = np.array(y_list)
+# -------------------------------------------
+# ✦ Формування навчальних даних
+# -------------------------------------------
+window = 50
+X = np.array([scaled[i - window : i, 0] for i in range(window, len(scaled))])
+y = np.array([scaled[i, 0] for i in range(window, len(scaled))])
 X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-# ...existing code...
 
-
-# --------------------------
-# 3. Вибір моделі користувачем
-# --------------------------
-model_type = "LSTM"  # <<< ЗМІНИ НА "LSTM" або "GRU"
-
-print(f"📌 Обрана модель: {model_type}")
-
+# -------------------------------------------
+# ✦ Побудова моделі
+# -------------------------------------------
 model = Sequential()
 
-if model_type.upper() == "LSTM":
-    model.add(LSTM(64, return_sequences=True, input_shape=(window, 1)))
-    model.add(LSTM(32))
-elif model_type.upper() == "GRU":
-    model.add(GRU(64, return_sequences=True, input_shape=(window, 1)))
-    model.add(GRU(32))
+if model_choice == "1":
+    print("\nВикористовується модель: LSTM\n")
+    model.add(LSTM(64, return_sequences=False, input_shape=(window, 1)))
 else:
-    raise ValueError("Невідомий тип моделі. Використай 'LSTM' або 'GRU'.")
+    print("\nВикористовується модель: GRU\n")
+    model.add(GRU(64, return_sequences=False, input_shape=(window, 1)))
 
 model.add(Dense(1))
+model.compile(optimizer="adam", loss="mse")
 
-model.compile(optimizer="adam", loss="mean_squared_error")
-model.fit(X, y, epochs=15, batch_size=32, verbose=1)
+# Навчання
+print("Навчання моделі...")
+model.fit(X, y, epochs=10, batch_size=32, verbose=1)
 
+# -------------------------------------------
+# ✦ Прогноз "від часу до часу"
+# -------------------------------------------
+last_sequence = scaled[-window:]
+future_predictions = []
 
-# --------------------------
-# 4. Прогноз на 10 годин вперед
-# --------------------------
-future_steps = 10
-last_window = scaled[-window:]
-predictions = []
+current_input = last_sequence
 
-current_input = last_window.reshape(1, window, 1)
+for _ in range(predict_steps):
+    pred = model.predict(current_input.reshape(1, window, 1), verbose=0)
+    future_predictions.append(pred[0][0])
+    current_input = np.vstack((current_input[1:], pred))
 
-for _ in range(future_steps):
-    pred = model.predict(current_input)[0][0]
-    predictions.append(pred)
-
-    current_input = np.append(current_input[:, 1:, :], [[[pred]]], axis=1)
-
-forecast_values = scaler.inverse_transform(
-    np.array(predictions).reshape(-1, 1)
-).flatten()
-
-# Часовий індекс
-last_time = df.index[-1]
-forecast_index = pd.date_range(
-    start=last_time + pd.Timedelta(hours=1), periods=future_steps, freq="H"
+future_predictions = scaler.inverse_transform(
+    np.array(future_predictions).reshape(-1, 1)
 )
 
-forecast_series = pd.Series(forecast_values, index=forecast_index)
+# -------------------------------------------
+# ✦ Побудова графіка
+# -------------------------------------------
+close_data = df["close"].to_numpy()[-300:]
 
-print("📈 Погодинний прогноз на 10 годин:")
-print(forecast_series)
-
-
-# --------------------------
-# 5. Графік
-# --------------------------
 plt.figure(figsize=(12, 6))
-plt.plot(df["price"], label="Historical (hourly)")
+plt.plot(close_data, label="Історія")
 plt.plot(
-    forecast_series, label=f"{model_type} Forecast (next 10 hours)", linestyle="--"
+    range(len(close_data), len(close_data) + predict_steps),
+    future_predictions,
+    label="Прогноз",
 )
-plt.title(f"BTC Hour-to-Hour Forecast ({model_type} Neural Network)")
-plt.xlabel("Time (hourly)")
-plt.ylabel("USD")
+plt.title(f"{symbol} Прогноз ({interval})")
 plt.legend()
 plt.grid()
-
-output_file = f"btc_{model_type.lower()}_forecast.png"
-plt.savefig(output_file, dpi=150, bbox_inches="tight")
-print(f"Графік збережено у {output_file}")
-
 plt.show()
